@@ -381,14 +381,11 @@ impl PickerApp {
             {
                 let summary = balance(selected, pool, self.prefs.quality_weight);
                 ui.label(
-                    RichText::new(format!("Баланс {}", charts::number(summary.score)))
+                    RichText::new(format!("Качество {}", charts::number(summary.quality.map(|q| q * 100.0))))
                         .size(11.0)
                         .color(MUTED),
                 )
-                .on_hover_text(format!(
-                    "{} из 6 показателей · формула в расширенном виде. Правее — выше баланс.",
-                    summary.covered
-                ));
+                .on_hover_text("Средний ранг доступных индексов Intelligence, Coding и Agentic среди всех загруженных моделей. Правее — выше качество; при равном качестве — выше стоимость задачи AA. Цена не влияет на оценку качества.");
             } else if self.snapshot.is_none() {
                 if ui
                     .link(RichText::new("Подключить данные").size(11.0))
@@ -536,7 +533,8 @@ impl PickerApp {
         ui.label(RichText::new("Обновление раз в сутки. 100 запросов/сутки на Free; каждая страница — отдельный запрос. Личное/внутреннее использование с указанием источника.").size(12.0).color(MUTED));
         ui.add_space(12.0);
         ui.separator();
-        ui.heading("Единый балл простого пикера");
+        ui.heading("Баланс в расширенном виде");
+        ui.label("Основной слайдер упорядочен по качеству. Этот вес меняет только балл баланса.");
         let mut weight = self.prefs.quality_weight * 100.0;
         ui.add(
             egui::Slider::new(&mut weight, 0.0..=100.0)
@@ -1059,7 +1057,7 @@ mod tests {
                 .iter()
                 .any(|s| s == "Обновить" || s == "Сначала дешевле" || s == "API-ключ")
         );
-        assert!(texts.iter().any(|s| s.contains("Баланс")));
+        assert!(texts.iter().any(|s| s.contains("Качество")));
         assert!(
             max_bottom <= COMPACT.y,
             "text extends below widget: {max_bottom}"

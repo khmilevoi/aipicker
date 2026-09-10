@@ -262,11 +262,12 @@ pub fn balance(model: &Model, pool: &[Model], quality_weight: f64) -> Balance {
     }
 }
 
+/// The compact rail increases in quality, with task cost breaking equal-quality ties.
 pub fn balanced_models<'a>(models: &'a [Model], prefs: &Preferences) -> Vec<&'a Model> {
     let mut filtered = ordered_models(models, prefs);
     let scores: std::collections::BTreeMap<_, _> = models
         .iter()
-        .map(|m| (&m.id, balance(m, models, prefs.quality_weight).score))
+        .map(|m| (&m.id, balance(m, models, prefs.quality_weight).quality))
         .collect();
     filtered.sort_by(|a, b| {
         match (scores[&a.id], scores[&b.id]) {
@@ -275,6 +276,7 @@ pub fn balanced_models<'a>(models: &'a [Model], prefs: &Preferences) -> Vec<&'a 
             (Some(_), None) => Ordering::Greater,
             (None, None) => Ordering::Equal,
         }
+        .then_with(|| optional_cmp(a.task_cost, b.task_cost, false))
         .then_with(|| a.id.cmp(&b.id))
     });
     filtered
