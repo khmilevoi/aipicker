@@ -71,6 +71,38 @@ fn current_free_schema_keeps_null_separate_from_zero() {
 }
 
 #[test]
+fn current_free_schema_accepts_creator_name_when_slug_is_absent() {
+    let body = json!({"tier":"free", "intelligence_index_version":4.3,
+        "pagination":{"page":1,"page_size":200,"total_pages":1,"has_more":false},
+        "data":[{"id":"abc","name":"Model","slug":"model",
+            "model_creator":{"id":"creator","name":"OpenAI"},
+            "evaluations":{},
+            "pricing":{"price_1m_input_tokens":2,"price_1m_output_tokens":10}}]});
+
+    let page = parse_page(&body.to_string()).unwrap();
+
+    assert_eq!(page.models[0].provider, "openai");
+}
+
+#[test]
+fn creator_slug_is_authoritative_and_name_is_only_a_fallback() {
+    let body = json!({"tier":"free", "intelligence_index_version":4.3,
+    "pagination":{"page":1,"page_size":4,"total_pages":1,"has_more":false},
+    "data":[
+        {"id":"unknown-slug","name":"A","slug":"a","model_creator":{"slug":"other","name":"OpenAI"},"evaluations":{},"pricing":{}},
+        {"id":"blank-slug","name":"B","slug":"b","model_creator":{"slug":"  ","name":"Anthropic"},"evaluations":{},"pricing":{}},
+        {"id":"unknown-name","name":"C","slug":"c","model_creator":{"name":"Other"},"evaluations":{},"pricing":{}},
+        {"id":"missing-creator","name":"D","slug":"d","model_creator":{},"evaluations":{},"pricing":{}}
+    ]});
+
+    let page = parse_page(&body.to_string()).unwrap();
+    let ids: Vec<_> = page.models.iter().map(|model| model.id.as_str()).collect();
+
+    assert_eq!(ids, ["blank-slug"]);
+    assert_eq!(page.models[0].provider, "anthropic");
+}
+
+#[test]
 fn schema_drift_and_negative_prices_are_rejected() {
     assert!(parse_page(r#"{"data":[]}"#).is_err());
     let body = json!({"intelligence_index_version":4.3,

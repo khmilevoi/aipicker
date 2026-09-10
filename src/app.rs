@@ -1,5 +1,6 @@
 use crate::{
     charts::{self, ACCENT, MUTED},
+    theme::{self, WARNING},
     tray::{self, Tray},
 };
 use aipicker::{
@@ -10,8 +11,9 @@ use aipicker::{
     source::{self, FetchError},
     storage::Store,
 };
-use eframe::egui::{self, Color32, RichText, Vec2, ViewportCommand, vec2};
+use eframe::egui::{self, RichText, Vec2, ViewportCommand, vec2};
 use std::{
+    collections::BTreeMap,
     sync::mpsc::{self, Receiver},
     time::Duration,
 };
@@ -19,10 +21,328 @@ use std::{
 pub const COMPACT: Vec2 = vec2(420.0, 148.0);
 const FILTER: Vec2 = vec2(420.0, 590.0);
 const EXPANDED: Vec2 = vec2(1000.0, 720.0);
-const INK: Color32 = Color32::from_rgb(42, 38, 52);
-const SOFT: Color32 = Color32::from_rgb(248, 246, 252);
-const WARNING: Color32 = Color32::from_rgb(157, 91, 39);
 
+fn version_name(name: &str) -> &str {
+    let Some((base, suffix)) = name.trim().rsplit_once(" (") else {
+        return name;
+    };
+    let Some(level) = suffix.strip_suffix(')') else {
+        return name;
+    };
+    let mut has_reasoning = false;
+    // Strip only known variant metadata; dates and unknown qualifiers identify releases.
+    for part in level.split(',') {
+        let part = part.trim().to_ascii_lowercase();
+        if part == "default fallback" {
+            continue;
+        }
+        let part = part.strip_suffix(" effort").unwrap_or(&part);
+        if !matches!(
+            part,
+            "minimal"
+                | "low"
+                | "medium"
+                | "high"
+                | "xhigh"
+                | "extra high"
+                | "max"
+                | "none"
+                | "off"
+                | "adaptive"
+                | "adaptive reasoning"
+                | "thinking"
+                | "non-reasoning"
+                | "reasoning"
+        ) {
+            return name;
+        }
+        has_reasoning = true;
+    }
+    if has_reasoning { base } else { name }
+}
+
+fn provider_label(provider: &str) -> &str {
+    match provider {
+        "openai" => "OpenAI / Codex",
+        "anthropic" => "Anthropic / Claude",
+        other => other,
+    }
+}
+
+// This is only a UI parent label. Exact releases and selection IDs stay intact.
+fn base_model_name(name: &str) -> &str {
+    let mut base = version_name(name);
+    while let Some((prefix, suffix)) = base.rsplit_once(" (") {
+        if prefix.is_empty()
+            || !suffix.ends_with(')')
+            || suffix[..suffix.len() - 1].contains(['(', ')'])
+        {
+            break;
+        }
+        base = prefix;
+    }
+    base
+}
+
+fn matching_models<'a>(models: &'a [Model], query: &str) -> Vec<&'a Model> {
+    let query = query.trim().to_lowercase();
+    models
+        .iter()
+        .filter(|m| {
+            m.name.to_lowercase().contains(&query)
+                || provider_label(&m.provider).to_lowercase().contains(&query)
+                || model_family(&m.name).to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+fn provider_enabled(prefs: &Preferences, provider: &str) -> bool {
+    match provider {
+        "openai" => prefs.openai,
+        "anthropic" => prefs.anthropic,
+        _ => false,
+    }
+}
+
+fn selected_count(models: &[&Model], prefs: &Preferences) -> usize {
+    models
+        .iter()
+        .filter(|m| provider_enabled(prefs, &m.provider) && !prefs.disabled.contains(&m.id))
+        .count()
+}
+
+fn select_models(pool: &[Model], models: &[&Model], prefs: &mut Preferences, selected: bool) {
+    for model in models {
+        if selected {
+            // Preserve effective exclusions when enabling a previously disabled provider.
+            if !provider_enabled(prefs, &model.provider) {
+                prefs.disabled.extend(
+                    pool.iter()
+                        .filter(|m| m.provider == model.provider)
+                        .map(|m| m.id.clone()),
+                );
+                match model.provider.as_str() {
+                    "openai" => prefs.openai = true,
+                    "anthropic" => prefs.anthropic = true,
+                    _ => continue,
+                }
+            }
+            prefs.disabled.remove(&model.id);
+        } else {
+            prefs.disabled.insert(model.id.clone());
+        }
+    }
+}
+
+fn selection_checkbox(
+    ui: &mut egui::Ui,
+    label: &str,
+    models: &[&Model],
+    pool: &[Model],
+    prefs: &mut Preferences,
+) {
+    let count = selected_count(models, prefs);
+    let mut selected = count == models.len();
+    if ui
+        .add(
+            egui::Checkbox::new(&mut selected, label)
+                .indeterminate(count > 0 && count < models.len()),
+        )
+        .changed()
+    {
+        select_models(pool, models, prefs, selected);
+    }
+}
+
+fn model_family(name: &str) -> &str {
+    let name = base_model_name(name);
+    let words: Vec<_> = name.split(|c: char| !c.is_alphanumeric()).collect();
+    if words.iter().any(|w| w.eq_ignore_ascii_case("codex")) {
+        return "Codex";
+    }
+    if name.starts_with("Claude ") {
+        for (word, family) in [
+            ("Sonnet", "Claude Sonnet"),
+            ("Opus", "Claude Opus"),
+            ("Haiku", "Claude Haiku"),
+            ("Fable", "Claude Fable"),
+        ] {
+            if words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+                return family;
+            }
+        }
+    }
+    if name.starts_with("gpt-oss-") {
+        return "gpt-oss";
+    }
+    if name.starts_with("GPT-") || name.starts_with("GPT ") {
+        return "GPT";
+    }
+    if name.as_bytes().first() == Some(&b'o')
+        && name.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+    {
+        return "o-series";
+    }
+    base_model_name(name)
+}
+
+fn filter_group(
+    ui: &mut egui::Ui,
+    key: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    group: &[&Model],
+    pool: &[Model],
+    prefs: &mut Preferences,
+    body: impl FnOnce(&mut egui::Ui, &mut Preferences),
+) {
+    let searching = ui
+        .data(|d| d.get_temp::<bool>(egui::Id::new("filter-searching")))
+        .unwrap_or(false);
+    let id = ui.make_persistent_id((key, searching));
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if searching {
+        state.set_open(true);
+    }
+    state
+        .show_header(ui, |ui| {
+            selection_checkbox(ui, label, group, pool, prefs);
+            ui.label(
+                RichText::new(format!("{}/{}", selected_count(group, prefs), group.len()))
+                    .small()
+                    .color(MUTED),
+            );
+        })
+        .body(|ui| body(ui, prefs));
+}
+
+fn filter_versions(ui: &mut egui::Ui, models: &[&Model], pool: &[Model], prefs: &mut Preferences) {
+    let mut versions: BTreeMap<&str, Vec<&Model>> = BTreeMap::new();
+    for model in models {
+        versions
+            .entry(version_name(&model.name))
+            .or_default()
+            .push(model);
+    }
+    for (version, mut variants) in versions {
+        variants.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        let has_variants = pool
+            .iter()
+            .filter(|m| m.provider == variants[0].provider && version_name(&m.name) == version)
+            .count()
+            > 1;
+        if !has_variants {
+            ui.push_id(&variants[0].id, |ui| {
+                selection_checkbox(ui, &variants[0].name, &variants, pool, prefs)
+            });
+        } else {
+            filter_group(
+                ui,
+                ("version", version),
+                version,
+                &variants,
+                pool,
+                prefs,
+                |ui, prefs| {
+                    for model in &variants {
+                        ui.push_id(&model.id, |ui| {
+                            selection_checkbox(ui, &model.name, &[*model], pool, prefs)
+                        });
+                    }
+                },
+            );
+        }
+    }
+}
+
+fn filter_base_models(
+    ui: &mut egui::Ui,
+    models: &[&Model],
+    pool: &[Model],
+    prefs: &mut Preferences,
+) {
+    let mut bases: BTreeMap<&str, Vec<&Model>> = BTreeMap::new();
+    for model in models {
+        bases
+            .entry(base_model_name(&model.name))
+            .or_default()
+            .push(model);
+    }
+    for (base, releases) in bases {
+        let versions: std::collections::BTreeSet<_> = pool
+            .iter()
+            .filter(|m| m.provider == releases[0].provider && base_model_name(&m.name) == base)
+            .map(|m| version_name(&m.name))
+            .collect();
+        if versions.len() > 1 {
+            filter_group(
+                ui,
+                ("base-model", base),
+                base,
+                &releases,
+                pool,
+                prefs,
+                |ui, prefs| filter_versions(ui, &releases, pool, prefs),
+            );
+        } else {
+            filter_versions(ui, &releases, pool, prefs);
+        }
+    }
+}
+
+fn filter_tree(
+    ui: &mut egui::Ui,
+    pool: &[Model],
+    models: &[&Model],
+    prefs: &mut Preferences,
+    searching: bool,
+) {
+    // Search expansion is separate so clearing it restores the normal tree.
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("filter-searching"), searching));
+    let mut providers: BTreeMap<&str, Vec<&Model>> = BTreeMap::new();
+    for model in models {
+        providers.entry(&model.provider).or_default().push(model);
+    }
+    for (provider, group) in providers {
+        filter_group(
+            ui,
+            ("provider", provider),
+            provider_label(provider),
+            &group,
+            pool,
+            prefs,
+            |ui, prefs| {
+                let mut families: BTreeMap<&str, Vec<&Model>> = BTreeMap::new();
+                for model in &group {
+                    families
+                        .entry(model_family(&model.name))
+                        .or_default()
+                        .push(model);
+                }
+                for (family, variants) in families {
+                    let distinct: std::collections::BTreeSet<_> = pool
+                        .iter()
+                        .filter(|m| m.provider == provider && model_family(&m.name) == family)
+                        .map(|m| base_model_name(&m.name))
+                        .collect();
+                    if distinct.len() == 1 {
+                        filter_base_models(ui, &variants, pool, prefs);
+                    } else {
+                        filter_group(
+                            ui,
+                            ("family", family),
+                            family,
+                            &variants,
+                            pool,
+                            prefs,
+                            |ui, prefs| filter_base_models(ui, &variants, pool, prefs),
+                        );
+                    }
+                }
+            },
+        );
+    }
+}
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Map,
@@ -52,26 +372,7 @@ pub struct PickerApp {
 }
 
 pub fn configure_style(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Light);
-    let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
-    style.visuals = egui::Visuals::light();
-    style.visuals.panel_fill = Color32::WHITE;
-    style.visuals.window_fill = Color32::WHITE;
-    style.visuals.extreme_bg_color = SOFT;
-    style.visuals.selection.bg_fill = Color32::from_rgb(239, 231, 252);
-    style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-    style.visuals.widgets.inactive.bg_fill = SOFT;
-    style.visuals.widgets.inactive.weak_bg_fill = SOFT;
-    style.visuals.widgets.inactive.bg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(231, 226, 240));
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(242, 235, 251);
-    style.visuals.override_text_color = Some(INK);
-    style.spacing.item_spacing = vec2(8.0, 7.0);
-    style.spacing.button_padding = vec2(10.0, 6.0);
-    style
-        .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-    ctx.set_style_of(egui::Theme::Light, style);
+    theme::configure(ctx);
 }
 
 impl PickerApp {
@@ -162,8 +463,8 @@ impl PickerApp {
             return;
         }
         if self.key.trim().is_empty() {
-            self.tab = Tab::Settings;
             self.resize(ctx, true, false);
+            self.tab = Tab::Settings;
             self.error = Some("Добавьте бесплатный API-ключ.".into());
             return;
         }
@@ -235,6 +536,9 @@ impl PickerApp {
     }
 
     fn resize(&mut self, ctx: &egui::Context, expanded: bool, filters: bool) {
+        if expanded && !self.expanded {
+            self.tab = Tab::Map;
+        }
         self.expanded = expanded;
         self.filters = filters;
         let available = ctx
@@ -391,8 +695,8 @@ impl PickerApp {
                     .link(RichText::new("Подключить данные").size(11.0))
                     .clicked()
                 {
-                    self.tab = Tab::Settings;
                     self.resize(ui.ctx(), true, false);
+                    self.tab = Tab::Settings;
                 }
             } else {
                 ui.label(
@@ -414,54 +718,71 @@ impl PickerApp {
     }
 
     fn filters_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Модели в пикере");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.prefs.openai, "OpenAI / Codex");
-            ui.checkbox(&mut self.prefs.anthropic, "Claude");
-        });
+        theme::section(ui, "Модели в пикере", "Выберите провайдеров, семейства и версии.");
         ui.add(
             egui::TextEdit::singleline(&mut self.query)
-                .hint_text("Найти модель")
+                .hint_text("Найти провайдера или модель")
+                .margin(egui::Margin::symmetric(10, 8))
                 .desired_width(f32::INFINITY),
         );
+        let pool = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.models.as_slice())
+            .unwrap_or_default();
+        let models = matching_models(pool, &self.query);
+        let searching = !self.query.trim().is_empty();
         ui.horizontal(|ui| {
-            if ui.small_button("Все").clicked() {
-                self.prefs.disabled.clear();
-                self.prefs.openai = true;
-                self.prefs.anthropic = true;
-            }
-            if ui.small_button("Ни одной").clicked()
-                && let Some(s) = &self.snapshot
+            if ui
+                .add_enabled(
+                    !models.is_empty(),
+                    egui::Button::new(if searching {
+                        "Все найденные"
+                    } else {
+                        "Все"
+                    })
+                    .small(),
+                )
+                .clicked()
             {
-                self.prefs
-                    .disabled
-                    .extend(s.models.iter().map(|m| m.id.clone()));
+                select_models(pool, &models, &mut self.prefs, true);
             }
+            if ui
+                .add_enabled(
+                    !models.is_empty(),
+                    egui::Button::new(if searching {
+                        "Убрать найденные"
+                    } else {
+                        "Ни одной"
+                    })
+                    .small(),
+                )
+                .clicked()
+            {
+                select_models(pool, &models, &mut self.prefs, false);
+            }
+            ui.label(
+                RichText::new(format!(
+                    "{}/{}",
+                    selected_count(&models, &self.prefs),
+                    models.len()
+                ))
+                .small()
+                .color(MUTED),
+            );
         });
-        let query = self.query.to_lowercase();
         egui::ScrollArea::vertical()
             .id_salt("model-filter-list")
-            .max_height(180.0)
+            .max_height(210.0)
             .show(ui, |ui| {
-                if let Some(snapshot) = &self.snapshot {
-                    for model in &snapshot.models {
-                        if !model.name.to_lowercase().contains(&query) {
-                            continue;
-                        }
-                        let active = (model.provider == "openai" && self.prefs.openai)
-                            || (model.provider == "anthropic" && self.prefs.anthropic);
-                        let mut enabled = !self.prefs.disabled.contains(&model.id);
-                        if ui
-                            .add_enabled(active, egui::Checkbox::new(&mut enabled, &model.name))
-                            .changed()
-                        {
-                            if enabled {
-                                self.prefs.disabled.remove(&model.id);
-                            } else {
-                                self.prefs.disabled.insert(model.id.clone());
-                            }
-                        }
-                    }
+                if models.is_empty() {
+                    ui.label(if pool.is_empty() {
+                        "Нет загруженных моделей"
+                    } else {
+                        "Ничего не найдено"
+                    });
+                } else {
+                    filter_tree(ui, pool, &models, &mut self.prefs, searching);
                 }
             });
         ui.separator();
@@ -495,12 +816,12 @@ impl PickerApp {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Данные и баланс");
-        ui.label("Artificial Analysis · бесплатный личный ключ");
+        theme::section(ui, "Подключение данных", "Artificial Analysis · личный API-ключ");
         ui.add(
             egui::TextEdit::singleline(&mut self.key_draft)
                 .password(true)
                 .hint_text("API-ключ")
+                .margin(egui::Margin::symmetric(10, 8))
                 .desired_width(480.0),
         );
         ui.checkbox(&mut self.remember_key, "Сохранить защищённо в Windows");
@@ -508,7 +829,7 @@ impl PickerApp {
             if ui
                 .add_enabled(
                     self.fetch.is_none() && !self.is_demo(),
-                    egui::Button::new("Применить и загрузить"),
+                    theme::primary_button("Применить и загрузить"),
                 )
                 .clicked()
             {
@@ -533,7 +854,7 @@ impl PickerApp {
         ui.label(RichText::new("Обновление раз в сутки. 100 запросов/сутки на Free; каждая страница — отдельный запрос. Личное/внутреннее использование с указанием источника.").size(12.0).color(MUTED));
         ui.add_space(12.0);
         ui.separator();
-        ui.heading("Баланс в расширенном виде");
+        theme::section(ui, "Баланс качества и стоимости", "Настройте приоритет для оценки выбранной модели.");
         ui.label("Основной слайдер упорядочен по качеству. Этот вес меняет только балл баланса.");
         let mut weight = self.prefs.quality_weight * 100.0;
         ui.add(
@@ -554,7 +875,7 @@ impl PickerApp {
         if ui
             .add_enabled(
                 self.fetch.is_none(),
-                egui::Button::new(if self.is_demo() {
+                theme::button(if self.is_demo() {
                     "Вернуться к данным API"
                 } else {
                     "Посмотреть демо без ключа"
@@ -593,8 +914,9 @@ impl PickerApp {
             .iter()
             .find(|m| Some(&m.id) == self.prefs.selected.as_ref())
             .unwrap_or(&models[0]);
+        ui.label(RichText::new("ВЫБРАННАЯ МОДЕЛЬ").size(11.0).color(MUTED));
         egui::ComboBox::from_id_salt("detail-model")
-            .width(ui.available_width() - 12.0)
+            .width(ui.available_width())
             .selected_text(&selected.name)
             .show_ui(ui, |ui| {
                 for model in models {
@@ -632,7 +954,7 @@ impl PickerApp {
         );
         ui.add_space(10.0);
         egui::Grid::new("model-metrics")
-            .spacing(vec2(24.0, 12.0))
+            .spacing(vec2(12.0, 12.0))
             .show(ui, |ui| {
                 for metric in Metric::ALL {
                     ui.label(metric.label());
@@ -659,37 +981,41 @@ impl PickerApp {
 
     fn expanded_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Map, "Карта моделей");
-            ui.selectable_value(&mut self.tab, Tab::Charts, "Бенчмарки");
-            ui.selectable_value(&mut self.tab, Tab::Settings, "Данные и баланс");
+            for (tab, label) in [(Tab::Map, "Пикер"), (Tab::Charts, "Бенчмарки"), (Tab::Settings, "Настройки")] {
+                if theme::segment(ui, self.tab == tab, label).clicked() {
+                    self.tab = tab;
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.fetch.is_some() {
-                    ui.spinner();
-                }
-                if ui
-                    .add_enabled(
-                        self.fetch.is_none()
-                            && !self.is_demo()
-                            && now() >= self.prefs.next_request_at,
-                        egui::Button::new("Обновить"),
-                    )
-                    .clicked()
-                {
-                    self.refresh(ui.ctx());
-                }
+                if self.fetch.is_some() { ui.spinner(); }
+                if ui.add_enabled(
+                    self.fetch.is_none() && !self.is_demo() && now() >= self.prefs.next_request_at,
+                    theme::button("Обновить"),
+                ).clicked() { self.refresh(ui.ctx()); }
             });
         });
-        ui.separator();
+        ui.add_space(16.0);
         if self.filters {
-            self.filters_ui(ui);
-            ui.separator();
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.filters_ui(ui);
+            });
+            ui.add_space(16.0);
         }
         if self.tab == Tab::Settings {
-            self.settings_ui(ui);
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.settings_ui(ui);
+            });
             return;
         }
         if let Some(error) = &self.error {
             ui.label(RichText::new(error).size(12.0).color(WARNING));
+        }
+        if self.tab == Tab::Map {
+            theme::section(ui, "Двумерный пикер", "Двигайте точку по качеству и стоимости. Отпустите — она плавно выберет ближайшую модель.");
+        } else {
+            theme::section(ui, "Сравнение моделей", "Расположение на карте и результаты бенчмарков для включённых моделей.");
         }
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("metric")
@@ -706,51 +1032,51 @@ impl PickerApp {
                         ui.selectable_value(&mut self.prefs.price_mode, mode, mode.label());
                     }
                 });
-            ui.selectable_value(&mut self.prefs.sort, SortBy::Price, "Сначала дешевле");
-            ui.selectable_value(&mut self.prefs.sort, SortBy::Quality, "Сначала сильнее");
+            if self.tab == Tab::Charts {
+                for (sort, label) in [(SortBy::Price, "Дешевле"), (SortBy::Quality, "Сильнее")] {
+                    if theme::segment(ui, self.prefs.sort == sort, label).clicked() {
+                        self.prefs.sort = sort;
+                    }
+                }
+            }
         });
         if self.prefs.price_mode == PriceMode::Blended {
             let mut input = self.prefs.input_share * 100.0;
-            ui.add(
-                egui::Slider::new(&mut input, 0.0..=100.0)
-                    .suffix("%")
-                    .text("доля входных токенов"),
-            );
+            ui.add(egui::Slider::new(&mut input, 0.0..=100.0).suffix("%").text("доля входных токенов"));
             self.prefs.input_share = input / 100.0;
         }
-        let models: Vec<Model> = self
-            .snapshot
-            .as_ref()
-            .map(|s| {
-                ordered_models(&s.models, &self.prefs)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        ui.label(
-            RichText::new(format!(
-                "{} моделей · все включённые уровни reasoning",
-                models.len()
-            ))
-            .size(11.0)
-            .color(MUTED),
-        );
+        let models: Vec<Model> = self.snapshot.as_ref().map(|s| {
+            ordered_models(&s.models, &self.prefs).into_iter().cloned().collect()
+        }).unwrap_or_default();
+        ui.label(RichText::new(format!("{} моделей · все включённые уровни reasoning", models.len())).size(11.0).color(MUTED));
         ui.add_space(8.0);
-        ui.columns(2, |columns| {
-            egui::Frame::new()
-                .fill(SOFT)
-                .inner_margin(16.0)
-                .corner_radius(12.0)
-                .show(&mut columns[0], |ui| {
-                    self.detail(ui, &models);
+        if self.tab == Tab::Map {
+            let gap = 16.0;
+            let width = ui.available_width();
+            let detail_width = ((width - gap) * 0.4).max(280.0);
+            let picker_width = (width - gap - detail_width).max(240.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.allocate_ui_with_layout(vec2(picker_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    charts::picker_2d(ui, &models, &mut self.prefs);
                 });
-            if self.tab == Tab::Map {
-                charts::scatter(&mut columns[1], &models, &mut self.prefs);
-            } else {
+                ui.allocate_ui_with_layout(vec2(detail_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    theme::card().show(ui, |ui| {
+                        ui.set_width((detail_width - 34.0).max(0.0));
+                        self.detail(ui, &models);
+                    });
+                });
+            });
+        } else {
+            ui.columns(2, |columns| {
+                theme::section(&mut columns[0], "Карта моделей", "Стоимость и выбранный показатель");
+                charts::scatter(&mut columns[0], &models, &mut self.prefs);
+                theme::section(&mut columns[1], "Рейтинг моделей", self.prefs.metric.label());
                 charts::bars(&mut columns[1], &models, &mut self.prefs);
-            }
-        });
+            });
+            ui.add_space(16.0);
+            theme::card().show(ui, |ui| self.detail(ui, &models));
+        }
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
@@ -808,12 +1134,16 @@ impl PickerApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::WHITE)
-                    .corner_radius(18.0)
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(232, 229, 238)))
+                    .fill(theme::CANVAS)
+                    .corner_radius(theme::WINDOW_RADIUS)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
                     .inner_margin(14.0),
             )
             .show(root, |ui| {
+                if !self.expanded {
+                    ui.spacing_mut().item_spacing.y = 5.0;
+                    ui.spacing_mut().interact_size.y = 18.0;
+                }
                 self.header(ui, &models);
                 if self.expanded {
                     ui.separator();
@@ -898,6 +1228,144 @@ impl eframe::App for PickerApp {
 mod tests {
     use super::*;
 
+    #[test]
+    fn expanded_opens_picker_and_benchmarks_contain_both_comparisons() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = PickerApp::load(Store::new(directory.path().to_path_buf()).unwrap(), true, false);
+        let ctx = egui::Context::default();
+        configure_style(&ctx);
+        app.tab = Tab::Settings;
+        app.resize(&ctx, true, false);
+        assert!(app.tab == Tab::Map, "expanding must return to the picker");
+        let render = |app: &mut PickerApp| {
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, EXPANDED)),
+                ..Default::default()
+            }, |root| app.render(root));
+            output.textures_delta.clear();
+            output.shapes.iter().filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            }).collect::<Vec<_>>()
+        };
+        render(&mut app);
+        let picker = render(&mut app);
+        assert!(picker.iter().any(|s| s == "Двумерный пикер"));
+        assert!(!picker.iter().any(|s| s == "Карта моделей"));
+        app.tab = Tab::Charts;
+        render(&mut app);
+        let benchmarks = render(&mut app);
+        assert!(benchmarks.iter().any(|s| s == "Карта моделей"));
+        assert!(benchmarks.iter().any(|s| s == "Рейтинг моделей"));
+    }
+
+    #[test]
+    fn versions_group_compound_claude_reasoning_variants() {
+        for base in ["Claude Sonnet 5", "Claude Opus 5"] {
+            for suffix in [
+                "Adaptive Reasoning, High Effort",
+                "Adaptive Reasoning, Low Effort",
+                "Adaptive Reasoning, Max Effort",
+                "Adaptive Reasoning, Medium Effort",
+                "Adaptive Reasoning, Xhigh Effort",
+                "Non-reasoning, High Effort",
+                "Adaptive Reasoning, Low Effort, Default Fallback",
+            ] {
+                let name = format!("{base} ({suffix})");
+                assert_eq!(version_name(&name), base, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn versions_preserve_release_dates_and_unknown_suffixes() {
+        assert_eq!(
+            version_name("Claude 3.5 Sonnet (Oct '24) (high)"),
+            "Claude 3.5 Sonnet (Oct '24)"
+        );
+        assert_eq!(
+            version_name("Claude 3.5 Sonnet (Oct '24)"),
+            "Claude 3.5 Sonnet (Oct '24)"
+        );
+        assert_eq!(
+            version_name("GPT-4o mini (preview)"),
+            "GPT-4o mini (preview)"
+        );
+        assert_eq!(version_name("GPT-5 (High effort)"), "GPT-5");
+        assert_eq!(
+            version_name("Claude 3.5 Sonnet (Oct '24) (Adaptive Reasoning, High Effort)"),
+            "Claude 3.5 Sonnet (Oct '24)"
+        );
+        for name in [
+            "Claude Sonnet 5 (Adaptive Reasoning, Sep '26)",
+            "Claude Sonnet 5 (Adaptive Reasoning, Preview)",
+            "Claude Sonnet 5 (High Effort, Unknown)",
+            "Claude Sonnet 5 (Default Fallback)",
+            "Claude Sonnet 5 (Adaptive Reasoning, )",
+        ] {
+            assert_eq!(version_name(name), name);
+        }
+    }
+
+    #[test]
+    fn selecting_search_results_preserves_other_provider_and_hidden_choices() {
+        let pool = Snapshot::demo().models;
+        let mut prefs = Preferences {
+            openai: false,
+            ..Default::default()
+        };
+        let found = matching_models(&pool, "Codex Пример (low)");
+        assert_eq!(
+            found.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["demo-0"]
+        );
+        select_models(&pool, &found, &mut prefs, true);
+        assert!(prefs.openai);
+        assert_eq!(
+            ordered_models(&pool, &prefs)
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["demo-0", "demo-1", "demo-3", "demo-5", "demo-7"]
+        );
+        let openai = matching_models(&pool, " OPENAI ");
+        assert_eq!(selected_count(&openai, &prefs), 1);
+        select_models(&pool, &openai, &mut prefs, true);
+        assert_eq!(selected_count(&openai, &prefs), 4);
+        select_models(&pool, &found, &mut prefs, false);
+        assert_eq!(selected_count(&openai, &prefs), 3);
+        assert_eq!(
+            selected_count(&matching_models(&pool, "Anthropic"), &prefs),
+            4
+        );
+    }
+
+    #[test]
+    fn families_keep_legacy_names_together_without_guessing_unknown_names() {
+        assert_eq!(model_family("Claude 3.5 Sonnet (Oct '24)"), "Claude Sonnet");
+        assert_eq!(model_family("Claude Sonnet 4.5"), "Claude Sonnet");
+        assert_eq!(model_family("GPT-4o mini"), "GPT");
+        assert_eq!(model_family("GPT-5.3 Codex"), "Codex");
+        assert_eq!(model_family("o3-pro"), "o-series");
+        assert_eq!(model_family("Unknown (preview)"), "Unknown");
+    }
+
+    #[test]
+    fn families_use_model_identity_instead_of_fallback_metadata() {
+        assert_eq!(
+            model_family("Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)"),
+            "Claude Fable"
+        );
+        assert_eq!(
+            model_family("Claude Fable 5.1 (Adaptive Reasoning, High Effort, Default Fallback)"),
+            "Claude Fable"
+        );
+        assert_eq!(model_family("gpt-oss-20b (high)"), "gpt-oss");
+        assert_eq!(model_family("gpt-oss-120b (low)"), "gpt-oss");
+        assert_eq!(version_name("gpt-oss-20b (high)"), "gpt-oss-20b");
+        assert_eq!(version_name("gpt-oss-120b (low)"), "gpt-oss-120b");
+    }
+
     fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
         vec![
             egui::Event::PointerMoved(pos),
@@ -908,6 +1376,217 @@ mod tests {
                 modifiers: egui::Modifiers::default(),
             },
         ]
+    }
+
+    #[test]
+    fn full_family_tree_collapses_and_expands_gpt4o_releases_without_search() {
+        let names = [
+            "GPT-4o (Aug '24)",
+            "GPT-4o (ChatGPT)",
+            "GPT-4o (March 2025, chatgpt-4o-latest)",
+            "GPT-4o (May '24)",
+            "GPT-4o (Nov '24)",
+            "GPT-4o mini",
+            "GPT-4.5 (Preview)",
+        ];
+        let template = Snapshot::demo().models[0].clone();
+        let pool: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Model {
+                id: format!("release-{i}"),
+                name: (*name).into(),
+                provider: "openai".into(),
+                ..template.clone()
+            })
+            .collect();
+        let models = matching_models(&pool, "");
+        let ctx = egui::Context::default();
+        configure_style(&ctx);
+        ctx.style_mut_of(egui::Theme::Light, |style| style.animation_time = 0.0);
+        let mut prefs = Preferences::default();
+        let before = prefs.clone();
+        let render = |prefs: &mut Preferences, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, FILTER)),
+                    events,
+                    ..Default::default()
+                },
+                |ui| filter_tree(ui, &pool, &models, prefs, false),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let label = |frame: &egui::FullOutput, name: &str| {
+            frame.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == name => Some(t.pos),
+                _ => None,
+            })
+        };
+        render(&mut prefs, Vec::new());
+        for parent in ["OpenAI / Codex", "GPT"] {
+            let frame = render(&mut prefs, Vec::new());
+            let chevron = label(&frame, parent).unwrap() + vec2(-35.0, 7.0);
+            render(&mut prefs, pointer(chevron, true));
+            render(&mut prefs, pointer(chevron, false));
+        }
+        let frame = render(&mut prefs, Vec::new());
+        let chevron = label(&frame, "GPT-4o").expect("base group") + vec2(-35.0, 7.0);
+        assert!(label(&frame, "GPT-4o mini").is_some());
+        assert!(label(&frame, "GPT-4.5 (Preview)").is_some());
+        for name in &names[..5] {
+            assert!(
+                label(&frame, name).is_none(),
+                "release should start collapsed: {name}"
+            );
+        }
+        render(&mut prefs, pointer(chevron, true));
+        render(&mut prefs, pointer(chevron, false));
+        let frame = render(&mut prefs, Vec::new());
+        for name in &names[..5] {
+            assert!(
+                label(&frame, name).is_some(),
+                "release should expand: {name}"
+            );
+        }
+        assert_eq!(prefs, before);
+        render(&mut prefs, pointer(chevron, true));
+        render(&mut prefs, pointer(chevron, false));
+        let frame = render(&mut prefs, Vec::new());
+        for name in &names[..5] {
+            assert!(label(&frame, name).is_none());
+        }
+    }
+
+    #[test]
+    fn release_tree_groups_screenshot_models_and_keeps_individual_choices() {
+        for (base, names) in [
+            (
+                "GPT-3.5 Turbo",
+                vec!["GPT-3.5 Turbo", "GPT-3.5 Turbo (0613)"],
+            ),
+            (
+                "GPT-4o",
+                vec![
+                    "GPT-4o (Aug '24)",
+                    "GPT-4o (ChatGPT)",
+                    "GPT-4o (March 2025, chatgpt-4o-latest)",
+                    "GPT-4o (May '24)",
+                    "GPT-4o (Nov '24)",
+                ],
+            ),
+            (
+                "GPT-5.5 Instant",
+                vec!["GPT-5.5 Instant (June 2026)", "GPT-5.5 Instant (May 2026)"],
+            ),
+        ] {
+            let template = Snapshot::demo().models[0].clone();
+            let pool: Vec<_> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| Model {
+                    id: format!("release-{i}"),
+                    name: (*name).into(),
+                    provider: "openai".into(),
+                    ..template.clone()
+                })
+                .collect();
+            let models = matching_models(&pool, "");
+            let ctx = egui::Context::default();
+            configure_style(&ctx);
+            ctx.style_mut_of(egui::Theme::Light, |style| style.animation_time = 0.0);
+            let mut prefs = Preferences::default();
+            let render = |prefs: &mut Preferences, events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, FILTER)),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| filter_tree(ui, &pool, &models, prefs, true),
+                );
+                output.textures_delta.clear();
+                output
+            };
+            render(&mut prefs, Vec::new());
+            let frame = render(&mut prefs, Vec::new());
+            let labels: Vec<_> = frame
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some((t.galley.text(), t.pos)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                labels.iter().filter(|(name, _)| *name == base).count(),
+                1 + usize::from(names.contains(&base)),
+                "missing parent group for {base}"
+            );
+            let leaf =
+                labels.iter().find(|(name, _)| *name == names[1]).unwrap().1 + vec2(4.0, 4.0);
+            render(&mut prefs, pointer(leaf, true));
+            render(&mut prefs, pointer(leaf, false));
+            assert_eq!(
+                prefs
+                    .disabled
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["release-1"]
+            );
+        }
+    }
+
+    #[test]
+    fn tree_expansion_preserves_selection_and_group_checkbox_changes_children() {
+        let pool = Snapshot::demo().models;
+        let models = matching_models(&pool, "");
+        let ctx = egui::Context::default();
+        configure_style(&ctx);
+        ctx.style_mut_of(egui::Theme::Light, |style| style.animation_time = 0.0);
+        let mut prefs = Preferences::default();
+        let before = prefs.clone();
+        let render = |prefs: &mut Preferences, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, FILTER)),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    filter_tree(ui, &pool, &models, prefs, false);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let label = |frame: &egui::FullOutput, name: &str| {
+            frame.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == name => Some(t.pos),
+                _ => None,
+            })
+        };
+        render(&mut prefs, Vec::new());
+        let frame = render(&mut prefs, Vec::new());
+        let provider = label(&frame, "Anthropic / Claude").unwrap();
+        assert!(label(&frame, "Claude Пример").is_none());
+        // The chevron precedes the checkbox and its label.
+        let chevron = provider + vec2(-35.0, 7.0);
+        render(&mut prefs, pointer(chevron, true));
+        render(&mut prefs, pointer(chevron, false));
+        let frame = render(&mut prefs, Vec::new());
+        assert!(label(&frame, "Claude Пример").is_some());
+        assert_eq!(prefs, before);
+        let checkbox = provider + vec2(4.0, 4.0);
+        render(&mut prefs, pointer(checkbox, true));
+        render(&mut prefs, pointer(checkbox, false));
+        assert_eq!(
+            selected_count(&matching_models(&pool, "Anthropic"), &prefs),
+            0
+        );
+        assert_eq!(selected_count(&matching_models(&pool, "OpenAI"), &prefs), 4);
     }
 
     fn chart_frame(
@@ -990,6 +1669,7 @@ mod tests {
         store.save_snapshot(&snapshot).unwrap();
         let mut app = PickerApp::load(store.clone(), false, false);
         app.filters = true;
+        app.query = "OpenAI".into();
         let ctx = egui::Context::default();
         configure_style(&ctx);
         let render = |app: &mut PickerApp, events: Vec<egui::Event>| {

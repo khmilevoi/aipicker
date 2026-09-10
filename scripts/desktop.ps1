@@ -28,6 +28,7 @@ public static class PickerDesktop {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
     [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll")] public static extern uint GetMenuItemID(IntPtr menu, int position);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int count, uint flags);
     [DllImport("user32.dll")] public static extern bool GetMenuItemRect(IntPtr hwnd, IntPtr menu, uint item, out Rect rect);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
@@ -130,13 +131,12 @@ switch ($Action) {
             $label=[System.Text.StringBuilder]::new(256)
             [PickerDesktop]::GetMenuString($menu,$item,$label,256,0x400) | Out-Null
             if($label.ToString() -eq 'Выход') {
-                $itemRect=[PickerDesktop+Rect]::new()
-                if(![PickerDesktop]::GetMenuItemRect([IntPtr]::Zero,$menu,$item,[ref]$itemRect)) { throw 'Could not read Exit menu bounds' }
-                [PickerDesktop]::SetCursorPos(($itemRect.Left+$itemRect.Right)/2,($itemRect.Top+$itemRect.Bottom)/2) | Out-Null
-                Start-Sleep -Milliseconds 100
-                [PickerDesktop]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
-                Start-Sleep -Milliseconds 80
-                [PickerDesktop]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+                # muda attaches the menu command handler to this exact tray HWND.
+                # Cancel tracking and dispatch the discovered Exit ID to that handler.
+                $commandId=[PickerDesktop]::GetMenuItemID($menu,$item)
+                if ($commandId -eq [uint32]::MaxValue) { throw 'Exit menu command ID missing' }
+                [PickerDesktop]::PostMessage($tray.Handle,0x1F,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null
+                [PickerDesktop]::PostMessage($tray.Handle,0x111,[IntPtr]$commandId,[IntPtr]::Zero) | Out-Null
                 $exitFound=$true
                 break
             }

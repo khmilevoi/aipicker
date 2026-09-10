@@ -3,10 +3,171 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
-pub const ACCENT: Color32 = Color32::from_rgb(153, 112, 222);
-pub const MINT: Color32 = Color32::from_rgb(130, 94, 192);
-pub const CORAL: Color32 = Color32::from_rgb(206, 134, 98);
-pub const MUTED: Color32 = Color32::from_rgb(130, 125, 140);
+use crate::theme;
+pub use crate::theme::{ACCENT, ACCENT_STRONG as MINT, CORAL, MUTED};
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+    use aipicker::domain::Snapshot;
+
+    fn frame(
+        ctx: &egui::Context,
+        models: &[Model],
+        prefs: &mut Preferences,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> Option<egui::Pos2> {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(650.0, 500.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                picker_2d(ui, models, prefs);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Circle(circle)
+                if circle.fill == Color32::WHITE && circle.radius == 16.5 =>
+            {
+                Some(circle.center)
+            }
+            _ => None,
+        })
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn free_drag_snaps_only_after_release_and_finishes_at_nearest_point() {
+        let ctx = egui::Context::default();
+        let models = Snapshot::demo().models;
+        let mut prefs = Preferences {
+            selected: Some(models[0].id.clone()),
+            ..Default::default()
+        };
+        let initial = frame(&ctx, &models, &mut prefs, 0.0, vec![]).unwrap();
+        frame(&ctx, &models, &mut prefs, 0.02, button(initial, true));
+        let destination = pos2(550.0, 100.0);
+        let dragged = frame(
+            &ctx,
+            &models,
+            &mut prefs,
+            0.04,
+            vec![egui::Event::PointerMoved(destination)],
+        )
+        .unwrap();
+        assert!(
+            dragged.distance(destination) < 0.1,
+            "thumb must follow both pointer axes"
+        );
+        assert_eq!(
+            prefs.selected.as_deref(),
+            Some(models[0].id.as_str()),
+            "selection commits at release"
+        );
+        let released = frame(&ctx, &models, &mut prefs, 0.06, button(destination, false)).unwrap();
+        assert!(
+            released.distance(destination) < 0.1,
+            "release must not jump"
+        );
+        let mid = frame(&ctx, &models, &mut prefs, 0.18, vec![]).unwrap();
+        let end = frame(&ctx, &models, &mut prefs, 0.6, vec![]).unwrap();
+        assert!(mid.distance(destination) > 0.1);
+        assert!(mid.distance(end) < destination.distance(end));
+        let settled = frame(&ctx, &models, &mut prefs, 0.8, vec![]).unwrap();
+        assert!(end.distance(settled) < 0.01);
+        let new_ctx = egui::Context::default();
+        let selected_position = frame(&new_ctx, &models, &mut prefs, 0.0, vec![]).unwrap();
+        assert!(end.distance(selected_position) < 0.01);
+    }
+
+    #[test]
+    fn empty_and_missing_measurements_have_no_thumb() {
+        let ctx = egui::Context::default();
+        let mut prefs = Preferences::default();
+        assert!(frame(&ctx, &[], &mut prefs, 0.0, vec![]).is_none());
+        let mut models = Snapshot::demo().models;
+        for model in &mut models {
+            model.input_price = None;
+            model.output_price = None;
+        }
+        assert!(frame(&ctx, &models, &mut prefs, 0.1, vec![]).is_none());
+    }
+
+    #[test]
+    fn single_model_stays_finite_and_release_outside_returns_to_it() {
+        let ctx = egui::Context::default();
+        let models = vec![Snapshot::demo().models[0].clone()];
+        let mut prefs = Preferences::default();
+        let initial = frame(&ctx, &models, &mut prefs, 0.0, vec![]).unwrap();
+        assert!(initial.x.is_finite() && initial.y.is_finite());
+        frame(&ctx, &models, &mut prefs, 0.02, button(initial, true));
+        let outside = pos2(900.0, -200.0);
+        let dragged = frame(
+            &ctx,
+            &models,
+            &mut prefs,
+            0.04,
+            vec![egui::Event::PointerMoved(outside)],
+        )
+        .unwrap();
+        assert!(dragged.x < 650.0 && dragged.y > 0.0);
+        frame(&ctx, &models, &mut prefs, 0.06, button(outside, false));
+        let settled = frame(&ctx, &models, &mut prefs, 0.6, vec![]).unwrap();
+        assert!(settled.distance(initial) < 0.01);
+        assert_eq!(prefs.selected.as_deref(), Some(models[0].id.as_str()));
+    }
+
+    #[test]
+    fn nearest_uses_visible_distance_on_a_wide_field() {
+        let mut models = Snapshot::demo().models[..3].to_vec();
+        for model in &mut models {
+            model.input_price = Some(0.0);
+            model.output_price = Some(0.0);
+            model.coding = Some(0.0);
+        }
+        models[0].coding = Some(100.0);
+        models[1].input_price = Some(10.0);
+        models[1].output_price = Some(10.0);
+        let ctx = egui::Context::default();
+        let mut prefs = Preferences {
+            selected: Some(models[0].id.clone()),
+            ..Default::default()
+        };
+        let top_left = frame(&ctx, &models, &mut prefs, 0.0, vec![]).unwrap();
+        let other_ctx = egui::Context::default();
+        let mut other_prefs = prefs.clone();
+        other_prefs.selected = Some(models[1].id.clone());
+        let bottom_right = frame(&other_ctx, &models, &mut other_prefs, 0.0, vec![]).unwrap();
+        let pointer = pos2(
+            top_left.x + (bottom_right.x - top_left.x) * 0.6,
+            top_left.y + (bottom_right.y - top_left.y) * 0.3,
+        );
+        assert!(pointer.distance(bottom_right) < pointer.distance(top_left));
+        frame(&ctx, &models, &mut prefs, 0.02, button(pointer, true));
+        frame(&ctx, &models, &mut prefs, 0.04, button(pointer, false));
+        assert_eq!(
+            prefs.selected.as_deref(),
+            Some(models[1].id.as_str()),
+            "normalized distance would incorrectly choose the top-left model"
+        );
+    }
+}
 pub fn color(model: &Model) -> Color32 {
     if model.provider == "openai" {
         MINT
@@ -45,7 +206,7 @@ pub fn model_title(title: &str) -> egui::text::LayoutJob {
         0.0,
         egui::TextFormat {
             font_id: FontId::proportional(17.0),
-            color: Color32::from_rgb(42, 38, 52),
+            color: theme::INK,
             ..Default::default()
         },
     );
@@ -75,7 +236,7 @@ pub fn icon_button(ui: &mut Ui, icon: ControlIcon, hint: &str) -> egui::Response
     let (rect, response) = ui.allocate_exact_size(vec2(24.0, 28.0), Sense::click());
     let p = ui.painter();
     if response.hovered() {
-        p.rect_filled(rect, 6.0, Color32::from_rgb(244, 239, 250));
+        p.rect_filled(rect, 6.0, theme::HOVER);
     }
     let c = rect.center();
     let stroke = Stroke::new(1.5, if response.hovered() { ACCENT } else { MUTED });
@@ -144,7 +305,7 @@ pub fn simple_rail(ui: &mut Ui, models: &[Model], selected: &mut Option<String>)
         }
     }
     let painter = ui.painter();
-    painter.rect_filled(track, 16.0, Color32::from_rgb(238, 234, 245));
+    painter.rect_filled(track, 16.0, theme::ACCENT_SOFT);
     if count == 0 {
         return;
     }
@@ -162,7 +323,7 @@ pub fn simple_rail(ui: &mut Ui, models: &[Model], selected: &mut Option<String>)
             pos2((x + 15.0).min(track.right()), track.bottom()),
         ),
         16.0,
-        Color32::from_rgb(173, 133, 235),
+        ACCENT,
     );
     for i in 0..count {
         let dot = pos2(x_for(i), track.center().y);
@@ -179,17 +340,242 @@ pub fn simple_rail(ui: &mut Ui, models: &[Model], selected: &mut Option<String>)
     let thumb = pos2(x, track.center().y);
     painter.circle_filled(thumb + vec2(0.0, 1.5), 17.0, Color32::from_black_alpha(14));
     painter.circle_filled(thumb, 16.5, Color32::WHITE);
-    painter.circle_stroke(
-        thumb,
-        16.5,
-        Stroke::new(0.7, Color32::from_rgb(235, 228, 246)),
-    );
+    painter.circle_stroke(thumb, 16.5, Stroke::new(0.7, theme::BORDER));
     if response.has_focus() {
         painter.rect_stroke(rect, 18.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
     }
     if let Some(pos) = response.hover_pos() {
         response.on_hover_text(&models[index_at(pos.x)].name);
     }
+}
+
+#[derive(Clone)]
+struct PickerMotion {
+    position: egui::Pos2,
+    from: egui::Pos2,
+    target: egui::Pos2,
+    started: f64,
+}
+
+/// A direct-manipulation counterpart to the compact rail. Selection commits on release.
+pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
+    let samples: Vec<_> = models
+        .iter()
+        .filter_map(|model| {
+            let price = model.price(prefs.price_mode, prefs.input_share)?;
+            let score = model.score(prefs.metric)?;
+            (price.is_finite() && score.is_finite() && price >= 0.0).then_some((
+                model,
+                price.ln_1p(),
+                score,
+            ))
+        })
+        .collect();
+    if samples.is_empty() {
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new("Пока нет точек для выбора")
+                .size(18.0)
+                .color(MUTED),
+        );
+        ui.label("Нужны цена и оценка модели. Выберите другой индекс или измените фильтры.");
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Качество выше ↑")
+                .size(12.0)
+                .color(MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(prefs.metric.label())
+                    .size(12.0)
+                    .color(MUTED),
+            );
+        });
+    });
+    let height = (ui.available_height() - 70.0).clamp(230.0, 370.0);
+    let (outer, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
+    let field = outer.shrink(28.0);
+    let min_x = samples.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let max_x = samples
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = samples.iter().map(|p| p.2).fold(f64::INFINITY, f64::min);
+    let max_y = samples
+        .iter()
+        .map(|p| p.2)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let fraction = |value: f64, min: f64, max: f64| {
+        if max > min {
+            ((value - min) / (max - min)) as f32
+        } else {
+            0.5
+        }
+    };
+    let points: Vec<_> = samples
+        .iter()
+        .map(|(model, price, score)| {
+            (
+                *model,
+                pos2(
+                    field.left() + fraction(*price, min_x, max_x) * field.width(),
+                    field.bottom() - fraction(*score, min_y, max_y) * field.height(),
+                ),
+            )
+        })
+        .collect();
+    let selected = points
+        .iter()
+        .find(|(model, _)| prefs.selected.as_ref() == Some(&model.id))
+        .unwrap_or(&points[0]);
+    if prefs.selected.as_ref() != Some(&selected.0.id) {
+        prefs.selected = Some(selected.0.id.clone());
+    }
+    let time = ui.input(|input| input.time);
+    let id = response.id.with("motion");
+    let mut motion = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<PickerMotion>(id))
+        .unwrap_or(PickerMotion {
+            position: selected.1,
+            from: selected.1,
+            target: selected.1,
+            started: time,
+        });
+    if motion.target != selected.1 && !response.is_pointer_button_down_on() {
+        motion.from = motion.position;
+        motion.target = selected.1;
+        motion.started = time;
+    }
+    let progress = ((time - motion.started) / 0.32).clamp(0.0, 1.0) as f32;
+    let eased = 1.0 - (1.0 - progress).powi(3);
+    motion.position = motion.from.lerp(motion.target, eased);
+    if response.is_pointer_button_down_on()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        motion.position = field.clamp(pointer);
+        motion.from = motion.position;
+        motion.started = time;
+        response.request_focus();
+    }
+    if response.drag_stopped() || response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            motion.position = field.clamp(pointer);
+        }
+        let nearest = points
+            .iter()
+            .min_by(|a, b| {
+                a.1.distance_sq(motion.position)
+                    .total_cmp(&b.1.distance_sq(motion.position))
+            })
+            .unwrap();
+        prefs.selected = Some(nearest.0.id.clone());
+        motion.from = motion.position;
+        motion.target = nearest.1;
+        motion.started = time;
+    }
+    if response.has_focus() {
+        let direction = ui.input(|input| {
+            if input.key_pressed(egui::Key::ArrowLeft) {
+                vec2(-1.0, 0.0)
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                vec2(1.0, 0.0)
+            } else if input.key_pressed(egui::Key::ArrowUp) {
+                vec2(0.0, -1.0)
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                vec2(0.0, 1.0)
+            } else {
+                egui::Vec2::ZERO
+            }
+        });
+        if direction != egui::Vec2::ZERO
+            && let Some(next) = points
+                .iter()
+                .filter(|point| (point.1 - motion.target).dot(direction) > 0.5)
+                .min_by(|a, b| {
+                    a.1.distance_sq(motion.target)
+                        .total_cmp(&b.1.distance_sq(motion.target))
+                })
+        {
+            prefs.selected = Some(next.0.id.clone());
+            motion.from = motion.position;
+            motion.target = next.1;
+            motion.started = time;
+        }
+    }
+    if time - motion.started < 0.32 && motion.position != motion.target {
+        ui.ctx().request_repaint();
+    }
+    let painter = ui.painter();
+    painter.rect_filled(outer, 22.0, theme::ACCENT_SOFT);
+    // The quiet lavender wash and white thumb echo the one-dimensional rail.
+    painter.rect_filled(
+        Rect::from_min_max(
+            outer.min,
+            pos2(
+                (motion.position.x + 18.0).min(outer.right()),
+                outer.bottom(),
+            ),
+        ),
+        22.0,
+        Color32::from_rgb(229, 215, 249),
+    );
+    for (model, point) in &points {
+        let selected = prefs.selected.as_ref() == Some(&model.id);
+        painter.circle_filled(
+            *point,
+            if selected { 5.0 } else { 3.5 },
+            if selected {
+                ACCENT
+            } else {
+                Color32::from_rgb(182, 161, 215)
+            },
+        );
+    }
+    painter.circle_filled(
+        motion.position + vec2(0.0, 2.0),
+        18.0,
+        Color32::from_black_alpha(10),
+    );
+    painter.circle_filled(
+        motion.position + vec2(0.0, 1.0),
+        17.0,
+        Color32::from_black_alpha(10),
+    );
+    painter.circle_filled(motion.position, 16.5, Color32::WHITE);
+    painter.circle_stroke(motion.position, 16.5, Stroke::new(0.8, theme::BORDER));
+    if response.has_focus() {
+        painter.rect_stroke(outer, 22.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+    }
+    if let Some(pointer) = response.hover_pos()
+        && let Some((model, _)) = points
+            .iter()
+            .filter(|(_, point)| point.distance(pointer) < 18.0)
+            .min_by(|a, b| {
+                a.1.distance_sq(pointer)
+                    .total_cmp(&b.1.distance_sq(pointer))
+            })
+    {
+        response.clone().on_hover_text(&model.name);
+    }
+    response.on_hover_cursor(egui::CursorIcon::Grab);
+    ui.ctx().data_mut(|data| data.insert_temp(id, motion));
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Дешевле").size(12.0).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new("Дороже →").size(12.0).color(MUTED));
+        });
+    });
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new("Перемещайте точку · отпустите, чтобы выбрать ближайшую модель")
+            .size(12.0)
+            .color(MUTED),
+    );
 }
 
 pub fn scatter(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
@@ -232,12 +618,12 @@ pub fn scatter(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let plot = Rect::from_min_max(outer.min + vec2(46.0, 18.0), outer.max - vec2(18.0, 38.0));
     let painter = ui.painter();
-    painter.rect_filled(plot, 8.0, Color32::from_rgb(250, 248, 253));
+    painter.rect_filled(plot, 8.0, theme::SURFACE);
     for tick in 0..=4 {
         let fraction = tick as f32 / 4.0;
         let x = plot.left() + fraction * plot.width();
         let y = plot.bottom() - fraction * plot.height();
-        let grid = Stroke::new(1.0, Color32::from_rgb(234, 230, 241));
+        let grid = Stroke::new(1.0, theme::BORDER);
         painter.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], grid);
         painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], grid);
         let raw_x = max_x * fraction as f64;
@@ -364,7 +750,7 @@ pub fn bars(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
                     Align2::LEFT_CENTER,
                     short,
                     FontId::proportional(12.0),
-                    Color32::from_rgb(44, 39, 57),
+                    theme::INK,
                 );
                 if let Some(score) = model.score(prefs.metric) {
                     let start = pos2(rect.left() + name_width, rect.top() + 13.0);

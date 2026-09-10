@@ -56,7 +56,10 @@ struct TaskCost {
 }
 #[derive(Deserialize)]
 struct Creator {
-    slug: String,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 #[derive(Deserialize)]
 struct Evaluations {
@@ -96,11 +99,14 @@ pub fn parse_page(body: &str) -> Result<Page, FetchError> {
     }
     let mut models = Vec::new();
     for m in wire.data {
+        let Some(provider) = m.model_creator.known_provider() else {
+            continue;
+        };
         let model = Model {
             id: m.id,
             name: m.name,
             slug: m.slug,
-            provider: m.model_creator.slug.to_lowercase(),
+            provider: provider.to_string(),
             input_price: m.pricing.price_1m_input_tokens,
             output_price: m.pricing.price_1m_output_tokens,
             task_cost: m
@@ -121,6 +127,28 @@ pub fn parse_page(body: &str) -> Result<Page, FetchError> {
         has_more: p.has_more,
         models,
     })
+}
+
+impl Creator {
+    fn known_provider(&self) -> Option<&'static str> {
+        let slug = self
+            .slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty());
+        if let Some(slug) = slug {
+            return known_provider_name(slug);
+        }
+        self.name.as_deref().and_then(known_provider_name)
+    }
+}
+
+fn known_provider_name(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openai" => Some("openai"),
+        "anthropic" => Some("anthropic"),
+        _ => None,
+    }
 }
 
 pub fn fetch_snapshot(endpoint: &str, key: &str) -> Result<Snapshot, FetchError> {

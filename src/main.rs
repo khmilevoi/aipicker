@@ -2,6 +2,7 @@
 
 mod app;
 mod charts;
+mod theme;
 mod tray;
 
 use aipicker::storage::Store;
