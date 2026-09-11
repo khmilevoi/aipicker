@@ -718,7 +718,11 @@ impl PickerApp {
     }
 
     fn filters_ui(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Модели в пикере", "Выберите провайдеров, семейства и версии.");
+        theme::section(
+            ui,
+            "Модели в пикере",
+            "Выберите провайдеров, семейства и версии.",
+        );
         ui.add(
             egui::TextEdit::singleline(&mut self.query)
                 .hint_text("Найти провайдера или модель")
@@ -816,7 +820,11 @@ impl PickerApp {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Подключение данных", "Artificial Analysis · личный API-ключ");
+        theme::section(
+            ui,
+            "Подключение данных",
+            "Artificial Analysis · личный API-ключ",
+        );
         ui.add(
             egui::TextEdit::singleline(&mut self.key_draft)
                 .password(true)
@@ -854,7 +862,11 @@ impl PickerApp {
         ui.label(RichText::new("Обновление раз в сутки. 100 запросов/сутки на Free; каждая страница — отдельный запрос. Личное/внутреннее использование с указанием источника.").size(12.0).color(MUTED));
         ui.add_space(12.0);
         ui.separator();
-        theme::section(ui, "Баланс качества и стоимости", "Настройте приоритет для оценки выбранной модели.");
+        theme::section(
+            ui,
+            "Баланс качества и стоимости",
+            "Настройте приоритет для оценки выбранной модели.",
+        );
         ui.label("Основной слайдер упорядочен по качеству. Этот вес меняет только балл баланса.");
         let mut weight = self.prefs.quality_weight * 100.0;
         ui.add(
@@ -900,6 +912,8 @@ impl PickerApp {
     }
 
     fn detail(&mut self, ui: &mut egui::Ui, models: &[Model]) {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.spacing_mut().interact_size.y = 18.0;
         if models.is_empty() {
             ui.label("Включите модели в фильтре.");
             return;
@@ -917,6 +931,7 @@ impl PickerApp {
         ui.label(RichText::new("ВЫБРАННАЯ МОДЕЛЬ").size(11.0).color(MUTED));
         egui::ComboBox::from_id_salt("detail-model")
             .width(ui.available_width())
+            .truncate()
             .selected_text(&selected.name)
             .show_ui(ui, |ui| {
                 for model in models {
@@ -927,7 +942,7 @@ impl PickerApp {
                     );
                 }
             });
-        ui.add_space(10.0);
+        ui.add_space(2.0);
         let pool = self
             .snapshot
             .as_ref()
@@ -952,49 +967,63 @@ impl PickerApp {
             .size(12.0)
             .color(MUTED),
         );
-        ui.add_space(10.0);
-        egui::Grid::new("model-metrics")
-            .spacing(vec2(12.0, 12.0))
-            .show(ui, |ui| {
-                for metric in Metric::ALL {
-                    ui.label(metric.label());
-                    ui.label(charts::number(selected.score(metric)));
-                    ui.end_row();
-                }
-                for (label, value) in [
-                    ("Вход / 1 млн токенов", selected.input_price),
-                    ("Выход / 1 млн токенов", selected.output_price),
-                    ("Задача AA", selected.task_cost),
-                ] {
-                    ui.label(label);
-                    ui.label(charts::money(value));
-                    ui.end_row();
-                }
+        ui.add_space(2.0);
+        for (label, value) in Metric::ALL
+            .into_iter()
+            .map(|metric| (metric.label(), charts::number(selected.score(metric))))
+            .chain([
+                ("Вход / 1 млн токенов", charts::money(selected.input_price)),
+                (
+                    "Выход / 1 млн токенов",
+                    charts::money(selected.output_price),
+                ),
+                ("Задача AA", charts::money(selected.task_cost)),
+            ])
+        {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).size(12.0).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(value).size(12.0).color(theme::INK));
+                });
             });
-        ui.add_space(14.0);
-        ui.label(RichText::new("Стоимость задачи AA учитывает расход токенов на тест. Она не предсказывает цену вашей задачи.").size(11.0).color(MUTED));
+        }
+        ui.add_space(4.0);
         ui.hyperlink_to(
-            "Методика Artificial Analysis",
+            RichText::new("Методика Artificial Analysis").size(11.0),
             "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-        );
+        ).on_hover_text("Стоимость задачи AA учитывает расход токенов на тест. Она не предсказывает цену вашей задачи.");
     }
 
     fn expanded_ui(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = 6.0;
         ui.horizontal(|ui| {
-            for (tab, label) in [(Tab::Map, "Пикер"), (Tab::Charts, "Бенчмарки"), (Tab::Settings, "Настройки")] {
+            for (tab, label) in [
+                (Tab::Map, "Пикер"),
+                (Tab::Charts, "Бенчмарки"),
+                (Tab::Settings, "Настройки"),
+            ] {
                 if theme::segment(ui, self.tab == tab, label).clicked() {
                     self.tab = tab;
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.fetch.is_some() { ui.spinner(); }
-                if ui.add_enabled(
-                    self.fetch.is_none() && !self.is_demo() && now() >= self.prefs.next_request_at,
-                    theme::button("Обновить"),
-                ).clicked() { self.refresh(ui.ctx()); }
+                if self.fetch.is_some() {
+                    ui.spinner();
+                }
+                if ui
+                    .add_enabled(
+                        self.fetch.is_none()
+                            && !self.is_demo()
+                            && now() >= self.prefs.next_request_at,
+                        theme::button("Обновить"),
+                    )
+                    .clicked()
+                {
+                    self.refresh(ui.ctx());
+                }
             });
         });
-        ui.add_space(16.0);
+        ui.add_space(8.0);
         if self.filters {
             theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -1013,9 +1042,17 @@ impl PickerApp {
             ui.label(RichText::new(error).size(12.0).color(WARNING));
         }
         if self.tab == Tab::Map {
-            theme::section(ui, "Двумерный пикер", "Двигайте точку по качеству и стоимости. Отпустите — она плавно выберет ближайшую модель.");
+            theme::section(
+                ui,
+                "Двумерный пикер",
+                "Двигайте точку по качеству и стоимости. Отпустите — она плавно выберет ближайшую модель.",
+            );
         } else {
-            theme::section(ui, "Сравнение моделей", "Расположение на карте и результаты бенчмарков для включённых моделей.");
+            theme::section(
+                ui,
+                "Сравнение моделей",
+                "Расположение на карте и результаты бенчмарков для включённых моделей.",
+            );
         }
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("metric")
@@ -1032,24 +1069,47 @@ impl PickerApp {
                         ui.selectable_value(&mut self.prefs.price_mode, mode, mode.label());
                     }
                 });
+            if self.prefs.price_mode == PriceMode::Blended {
+                let mut input = self.prefs.input_share * 100.0;
+                ui.scope(|ui| {
+                    ui.spacing_mut().slider_width = 84.0;
+                    ui.add(
+                        egui::Slider::new(&mut input, 0.0..=100.0)
+                            .suffix("%")
+                            .text("Вход"),
+                    )
+                    .on_hover_text("Доля входных токенов в смешанной цене");
+                });
+                self.prefs.input_share = input / 100.0;
+            }
             if self.tab == Tab::Charts {
-                for (sort, label) in [(SortBy::Price, "Дешевле"), (SortBy::Quality, "Сильнее")] {
+                for (sort, label) in [(SortBy::Price, "Дешевле"), (SortBy::Quality, "Сильнее")]
+                {
                     if theme::segment(ui, self.prefs.sort == sort, label).clicked() {
                         self.prefs.sort = sort;
                     }
                 }
             }
         });
-        if self.prefs.price_mode == PriceMode::Blended {
-            let mut input = self.prefs.input_share * 100.0;
-            ui.add(egui::Slider::new(&mut input, 0.0..=100.0).suffix("%").text("доля входных токенов"));
-            self.prefs.input_share = input / 100.0;
-        }
-        let models: Vec<Model> = self.snapshot.as_ref().map(|s| {
-            ordered_models(&s.models, &self.prefs).into_iter().cloned().collect()
-        }).unwrap_or_default();
-        ui.label(RichText::new(format!("{} моделей · все включённые уровни reasoning", models.len())).size(11.0).color(MUTED));
-        ui.add_space(8.0);
+        let models: Vec<Model> = self
+            .snapshot
+            .as_ref()
+            .map(|s| {
+                ordered_models(&s.models, &self.prefs)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        ui.label(
+            RichText::new(format!(
+                "{} моделей · все включённые уровни reasoning",
+                models.len()
+            ))
+            .size(11.0)
+            .color(MUTED),
+        );
+        ui.add_space(2.0);
         if self.tab == Tab::Map {
             let gap = 16.0;
             let width = ui.available_width();
@@ -1057,21 +1117,37 @@ impl PickerApp {
             let picker_width = (width - gap - detail_width).max(240.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                ui.allocate_ui_with_layout(vec2(picker_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    charts::picker_2d(ui, &models, &mut self.prefs);
-                });
-                ui.allocate_ui_with_layout(vec2(detail_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    theme::card().show(ui, |ui| {
-                        ui.set_width((detail_width - 34.0).max(0.0));
-                        self.detail(ui, &models);
-                    });
-                });
+                ui.allocate_ui_with_layout(
+                    vec2(picker_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        charts::picker_2d(ui, &models, &mut self.prefs);
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    vec2(detail_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        theme::card().show(ui, |ui| {
+                            ui.set_width((detail_width - 34.0).max(0.0));
+                            self.detail(ui, &models);
+                        });
+                    },
+                );
             });
         } else {
             ui.columns(2, |columns| {
-                theme::section(&mut columns[0], "Карта моделей", "Стоимость и выбранный показатель");
+                theme::section(
+                    &mut columns[0],
+                    "Карта моделей",
+                    "Стоимость и выбранный показатель",
+                );
                 charts::scatter(&mut columns[0], &models, &mut self.prefs);
-                theme::section(&mut columns[1], "Рейтинг моделей", self.prefs.metric.label());
+                theme::section(
+                    &mut columns[1],
+                    "Рейтинг моделей",
+                    self.prefs.metric.label(),
+                );
                 charts::bars(&mut columns[1], &models, &mut self.prefs);
             });
             ui.add_space(16.0);
@@ -1227,26 +1303,38 @@ impl eframe::App for PickerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("ui_snapshots.rs");
 
     #[test]
     fn expanded_opens_picker_and_benchmarks_contain_both_comparisons() {
         let directory = tempfile::tempdir().unwrap();
-        let mut app = PickerApp::load(Store::new(directory.path().to_path_buf()).unwrap(), true, false);
+        let mut app = PickerApp::load(
+            Store::new(directory.path().to_path_buf()).unwrap(),
+            true,
+            false,
+        );
         let ctx = egui::Context::default();
         configure_style(&ctx);
         app.tab = Tab::Settings;
         app.resize(&ctx, true, false);
         assert!(app.tab == Tab::Map, "expanding must return to the picker");
         let render = |app: &mut PickerApp| {
-            let mut output = ctx.run_ui(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, EXPANDED)),
-                ..Default::default()
-            }, |root| app.render(root));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, EXPANDED)),
+                    ..Default::default()
+                },
+                |root| app.render(root),
+            );
             output.textures_delta.clear();
-            output.shapes.iter().filter_map(|s| match &s.shape {
-                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
-                _ => None,
-            }).collect::<Vec<_>>()
+            output
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         };
         render(&mut app);
         let picker = render(&mut app);

@@ -15,6 +15,10 @@ pub const CORAL: Color32 = Color32::from_rgb(206, 134, 98);
 pub const CONTROL_HEIGHT: f32 = 32.0;
 pub const CARD_RADIUS: f32 = 12.0;
 pub const WINDOW_RADIUS: f32 = 18.0;
+pub const PICKER_FILL: Color32 = Color32::from_rgb(229, 215, 249);
+pub const PICKER_DOT: Color32 = Color32::from_rgb(182, 161, 215);
+pub const PICKER_RADIUS: f32 = 22.0;
+pub const PICKER_THUMB_RADIUS: f32 = 16.5;
 
 pub fn configure(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Light);
@@ -28,7 +32,8 @@ pub fn configure(ctx: &egui::Context) {
     visuals.hyperlink_color = ACCENT_STRONG;
     visuals.selection.bg_fill = ACCENT_SOFT;
     visuals.selection.stroke = Stroke::new(1.0, ACCENT_STRONG);
-    visuals.override_text_color = None;
+    visuals.override_text_color = Some(INK);
+    visuals.slider_trailing_fill = true;
     visuals.window_stroke = Stroke::new(1.0, BORDER);
     visuals.window_corner_radius = egui::CornerRadius::same(12);
     for widget in [
@@ -46,9 +51,11 @@ pub fn configure(ctx: &egui::Context) {
         widget.expansion = 0.0;
     }
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.5, ACCENT_STRONG);
     visuals.widgets.hovered.bg_fill = HOVER;
     visuals.widgets.hovered.weak_bg_fill = HOVER;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, ACCENT_STRONG);
     visuals.widgets.active.bg_fill = ACCENT_SOFT;
     visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT_STRONG);

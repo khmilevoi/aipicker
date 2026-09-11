@@ -395,7 +395,10 @@ pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
             );
         });
     });
-    let height = (ui.available_height() - 70.0).clamp(230.0, 370.0);
+    // A zero-height layout allocation does not describe the visible scroll viewport.
+    // Reserve room for both axis labels and the keyboard hint below the field.
+    let visible_height = ui.clip_rect().bottom() - ui.next_widget_position().y;
+    let height = (visible_height - 70.0).clamp(150.0, 370.0);
     let (outer, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
     let field = outer.shrink(28.0);
@@ -511,7 +514,7 @@ pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
         ui.ctx().request_repaint();
     }
     let painter = ui.painter();
-    painter.rect_filled(outer, 22.0, theme::ACCENT_SOFT);
+    painter.rect_filled(outer, theme::PICKER_RADIUS, theme::ACCENT_SOFT);
     // The quiet lavender wash and white thumb echo the one-dimensional rail.
     painter.rect_filled(
         Rect::from_min_max(
@@ -521,19 +524,15 @@ pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
                 outer.bottom(),
             ),
         ),
-        22.0,
-        Color32::from_rgb(229, 215, 249),
+        theme::PICKER_RADIUS,
+        theme::PICKER_FILL,
     );
     for (model, point) in &points {
         let selected = prefs.selected.as_ref() == Some(&model.id);
         painter.circle_filled(
             *point,
             if selected { 5.0 } else { 3.5 },
-            if selected {
-                ACCENT
-            } else {
-                Color32::from_rgb(182, 161, 215)
-            },
+            if selected { ACCENT } else { theme::PICKER_DOT },
         );
     }
     painter.circle_filled(
@@ -546,10 +545,19 @@ pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
         17.0,
         Color32::from_black_alpha(10),
     );
-    painter.circle_filled(motion.position, 16.5, Color32::WHITE);
-    painter.circle_stroke(motion.position, 16.5, Stroke::new(0.8, theme::BORDER));
+    painter.circle_filled(motion.position, theme::PICKER_THUMB_RADIUS, theme::CANVAS);
+    painter.circle_stroke(
+        motion.position,
+        theme::PICKER_THUMB_RADIUS,
+        Stroke::new(0.8, theme::BORDER),
+    );
     if response.has_focus() {
-        painter.rect_stroke(outer, 22.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+        painter.rect_stroke(
+            outer,
+            theme::PICKER_RADIUS,
+            Stroke::new(1.0, ACCENT),
+            StrokeKind::Inside,
+        );
     }
     if let Some(pointer) = response.hover_pos()
         && let Some((model, _)) = points
@@ -572,7 +580,7 @@ pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
     });
     ui.add_space(6.0);
     ui.label(
-        egui::RichText::new("Перемещайте точку · отпустите, чтобы выбрать ближайшую модель")
+        egui::RichText::new("Можно выбирать модели стрелками на клавиатуре")
             .size(12.0)
             .color(MUTED),
     );
@@ -580,7 +588,6 @@ pub fn picker_2d(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
 
 pub fn scatter(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
     ui.horizontal(|ui| {
-        ui.heading("Цена и качество");
         ui.checkbox(&mut prefs.logarithmic, "Лог. шкала цены");
     });
     ui.label(
@@ -709,7 +716,6 @@ pub fn scatter(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
 }
 
 pub fn bars(ui: &mut Ui, models: &[Model], prefs: &mut Preferences) {
-    ui.heading(format!("{} · сравнение моделей", prefs.metric.label()));
     ui.label(
         egui::RichText::new(
             "Баллы индекса, не процент правильных ответов. Нажмите строку для выбора.",
